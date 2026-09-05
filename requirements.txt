@@ -1,0 +1,12 @@
+llama-index-core
+llama-index-vector-stores-chroma
+llama-index-embeddings-huggingface
+llama-index-llms-groq
+chromadb
+streamlit
+sentence-transformers
+python-frontmatter
+pypdf
+python-docx
+python-dotenv
+pypdf
