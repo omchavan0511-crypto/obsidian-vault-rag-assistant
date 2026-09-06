@@ -3,7 +3,7 @@ import frontmatter
 from pypdf import PdfReader
 from docx import Document as DocxDocument
 from llama_index.core import Document, VectorStoreIndex, StorageContext
-from llama_index.core.node_parser import SentenceSplitter
+from llama_index.core.node_parser import TokenTextSplitter
 from llama_index.vector_stores.chroma import ChromaVectorStore
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 import chromadb
@@ -92,7 +92,7 @@ def build_index(vault_path: str, persist_dir: str) -> VectorStoreIndex:
         documents,
         storage_context=storage_context,
         embed_model=EMBED_MODEL,
-        transformations=[SentenceSplitter(chunk_size=512, chunk_overlap=50)],
+        transformations=[TokenTextSplitter(chunk_size=512, chunk_overlap=50)],
     )
     return index
 
