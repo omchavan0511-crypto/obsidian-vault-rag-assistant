@@ -1,38 +1,107 @@
-import re
-from llama_index.core import VectorStoreIndex
-from llama_index.core.query_engine import RetrieverQueryEngine
-from llama_index.llms.groq import Groq
+import os
+import frontmatter
+from pypdf import PdfReader
+from docx import Document as DocxDocument
+from llama_index.core import Document, VectorStoreIndex, StorageContext
+from llama_index.core.node_parser import TokenTextSplitter
+from llama_index.vector_stores.chroma import ChromaVectorStore
+from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+import chromadb
 
-NO_ANSWER_PHRASE = "I don't have information about this in the provided notes."
-
-SYSTEM_PROMPT = (
-    "Answer only using the provided context from the user's notes. "
-    f"If the context does not contain the answer, respond with exactly: \"{NO_ANSWER_PHRASE}\" and nothing else. "
-    "When the answer includes mathematical equations, format them using LaTeX with dollar-sign delimiters only: "
-    "inline math like $x^2$, display math like $$E=mc^2$$. "
-    "Never use \\( \\) or \\[ \\] delimiters. "
-    "After your answer, list the source note titles you used, unless you gave the no-information response above."
-)
-
-
-def fix_latex_delimiters(text: str) -> str:
-    text = re.sub(r"\\\[(.*?)\\\]", r"$$\1$$", text, flags=re.DOTALL)
-    text = re.sub(r"\\\((.*?)\\\)", r"$\1$", text, flags=re.DOTALL)
-    return text
+EMBED_MODEL = HuggingFaceEmbedding(model_name="BAAI/bge-small-en-v1.5")
+SKIP_EXTENSIONS = {
+    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".svg", ".ico",
+    ".mp3", ".mp4", ".mov", ".avi", ".wav",
+    ".zip", ".exe", ".bin", ".db", ".sqlite",
+}
 
 
-def get_query_engine(index: VectorStoreIndex, top_k: int = 4) -> RetrieverQueryEngine:
-    llm = Groq(model="openai/gpt-oss-20b", system_prompt=SYSTEM_PROMPT)
-    return index.as_query_engine(llm=llm, similarity_top_k=top_k)
+def read_md(filepath: str):
+    post = frontmatter.load(filepath)
+    return post.content, post.get("tags", [])
 
 
-def ask(query_engine: RetrieverQueryEngine, question: str):
-    response = query_engine.query(question)
-    answer = str(response)
+def read_txt(filepath: str):
+    with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
+        return f.read()
 
-    if NO_ANSWER_PHRASE in answer:
-        return NO_ANSWER_PHRASE, []
 
-    answer = fix_latex_delimiters(answer)
-    sources = sorted({node.metadata.get("title", "unknown") for node in response.source_nodes})
-    return answer, sources
+def read_pdf(filepath: str):
+    reader = PdfReader(filepath)
+    return "\n".join(page.extract_text() or "" for page in reader.pages)
+
+
+def read_docx(filepath: str):
+    doc = DocxDocument(filepath)
+    return "\n".join(p.text for p in doc.paragraphs)
+
+
+def load_file(filepath: str):
+    ext = os.path.splitext(filepath)[1].lower()
+    if ext in SKIP_EXTENSIONS:
+        return None, []
+
+    try:
+        if ext == ".md":
+            return read_md(filepath)
+        elif ext == ".pdf":
+            return read_pdf(filepath), []
+        elif ext == ".docx":
+            return read_docx(filepath), []
+        else:
+            return read_txt(filepath), []
+    except Exception:
+        return None, []
+
+
+def load_vault(vault_path: str) -> list[Document]:
+    documents = []
+    for root, _, filenames in os.walk(vault_path):
+        for filename in filenames:
+            filepath = os.path.join(root, filename)
+            text, tags = load_file(filepath)
+            if not text or not text.strip():
+                continue
+
+            title = os.path.splitext(filename)[0]
+            documents.append(
+                Document(
+                    text=text,
+                    metadata={
+                        "file_name": filename,
+                        "title": title,
+                        "path": filepath,
+                        "tags": ", ".join(tags),
+                    },
+                )
+            )
+    return documents
+
+
+def build_index(vault_path: str, persist_dir: str) -> VectorStoreIndex:
+    documents = load_vault(vault_path)
+    if not documents:
+        raise ValueError(f"No readable text files found under {vault_path}")
+
+    chroma_client = chromadb.PersistentClient(path=persist_dir)
+    collection = chroma_client.get_or_create_collection("obsidian_vault")
+    vector_store = ChromaVectorStore(chroma_collection=collection)
+    storage_context = StorageContext.from_defaults(vector_store=vector_store)
+
+    index = VectorStoreIndex.from_documents(
+        documents,
+        storage_context=storage_context,
+        embed_model=EMBED_MODEL,
+        transformations=[TokenTextSplitter(chunk_size=512, chunk_overlap=50)],
+    )
+    return index
+
+
+def load_index(persist_dir: str) -> VectorStoreIndex:
+    chroma_client = chromadb.PersistentClient(path=persist_dir)
+    collection = chroma_client.get_or_create_collection("obsidian_vault")
+    vector_store = ChromaVectorStore(chroma_collection=collection)
+    return VectorStoreIndex.from_vector_store(
+        vector_store,
+        embed_model=EMBED_MODEL,
+    )
